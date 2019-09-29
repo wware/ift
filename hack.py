@@ -14,6 +14,9 @@ BITS32 = 0xFFFFFFFF
 SIGN32 = 0x80000000
 FRACBITS = 16
 FRACTION = 1 << FRACBITS
+FRACMASK = FRACTION - 1
+
+
 def FIXED(flt):
     """
     >>> FIXED(2.)
@@ -21,6 +24,13 @@ def FIXED(flt):
     """
     assert isinstance(flt, float)
     return int(round(flt * FRACTION)) & BITS32
+
+def FIXFMT(f):
+    x = ''
+    if f & (1 << 31):
+        x = '-'
+        f = (1 << 32) - f
+    return x + str((1. * f) / FRACTION)
 
 def FIXADD(fix1, fix2):
     """
@@ -31,6 +41,16 @@ def FIXADD(fix1, fix2):
     >>> test(-1., -2., -3.)
     """
     return (fix1 + fix2) & BITS32
+
+def FIXSUB(fix1, fix2):
+    return (fix1 - fix2) & BITS32
+
+def FIXNEG(fix):
+    """
+    >>> FIXNEG(FIXED(-12.)) - ((1 << 32) - FIXNEG(FIXED(12.)))
+    0
+    """
+    return (-fix) & BITS32
 
 def FIXMULT(fix1, fix2):
     """
@@ -44,38 +64,60 @@ def FIXMULT(fix1, fix2):
         assert isinstance(fix, (int, long))
         if fix & SIGN32:
             return (-1, fix - BITS32 - 1)
-	else:
-	    return (1, fix)
+        else:
+            return (1, fix)
     s1, f1 = parts(fix1)
     s2, f2 = parts(fix2)
     unsigned_prod = (f1 * f2) >> FRACBITS
     assert unsigned_prod < (1 << 32)
     if s1 * s2 > 0:
-    	return unsigned_prod
+        return unsigned_prod
     else:
-        signed_prod = unsigned_prod
+        return (1 << 32) - unsigned_prod
 
 
-_table_size = 4096
+TABLE_BITS = 12
+_table_size = 1 << TABLE_BITS
 _sine_table = [
     FIXED(math.sin(2 * math.pi * i / _table_size))
     for i in xrange(_table_size)
 ]
 
+BUFBITS = 10
+BUFSIZE = 1 << BUFBITS
+
 class Sinusoid(object):
     def __init__(self):
-        self._ampl = self._phase = FIXED(0.)
+        self._a = self._ph = FIXED(0.)
         self._da = self._dph = FIXED(0.)
 
-    def set(self, da, dph):
-        self._da = da
-	self._dph = dph
+    def set(self, a, freq):
+        self._da = FIXSUB(a, self._a) >> BUFBITS
+        # phase is in cycles, not radians
+        self._dph = freq >> BUFBITS
 
     def iterate(self, buf):
-        for i in range(RETENTION_RATIO):
-	    x = buf[i]
-	    a, ph = self._a, self._ph
-	    new_a, new_ph = a + self._da, ph + self._dph
-            table_index = int((a & FRACBITS) * _table_size) / >> FRACBITS
-	    assert 0 <= table_index < _table_size
-	    sval = _sine_table
+        assert BUFSIZE == len(buf)
+        a, ph = self._a, self._ph
+        for i in range(BUFSIZE):
+            table_index = (ph & FRACMASK) >> (FRACBITS - TABLE_BITS)
+            assert 0 <= table_index < _table_size
+            sample = FIXMULT(a, _sine_table[table_index])
+            buf[i] = FIXADD(buf[i], sample)
+            a, ph = FIXADD(a, self._da), FIXADD(ph, self._dph)
+        self._a, self._ph = a, ph
+
+
+name = ('C', 'C#', 'D', 'Eb', 'E', 'F', 'F#', 'G', 'G#', 'A', 'Bb', 'B', "C'")
+notes = {
+    name[i]: 440 * (2.0**((i-9)/12.))
+    for i in range(13)
+}
+
+s = Sinusoid()
+s.set(FIXED(1.), FIXED(notes['C']))
+buf = BUFSIZE * [0]
+s.iterate(buf)
+import pprint
+pprint.pprint(buf)
+
